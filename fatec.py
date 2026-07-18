@@ -75,7 +75,7 @@ def generate(question):
     results = conn.execute(sql.sql_query).fetchall()
     return results
 
-API_TOKEN = '6677259411:AAEuGNSsEW4uAhRbqBbfzJqSN8pP46ODnUQ'
+API_TOKEN = ''
 bot = telebot.TeleBot(API_TOKEN)
 
 @bot.message_handler(func=lambda message: True)

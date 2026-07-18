@@ -1,6 +1,10 @@
 import sqlite3
 import dspy
 import os
+import telebot #pip install pytelegrambotapi
+import whisper #pip install -U openai-whisper
+### whisper requires ffmpeg: on windows: choco install ffmpeg
+import json
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 db_path = os.path.join(BASE_DIR, "lojas.db")
@@ -39,7 +43,7 @@ class TextToSQL(dspy.Signature):
         Database schema:
           - produtos: nome, departamento
     """
-    question = dspy.InputField(desc="Databases schema")
+    dbschema = dspy.InputField(desc="Databases schema")
     question = dspy.InputField(desc="Natural language question")
 
     sql_query = dspy.OutputField(desc="Valid SQL query")
@@ -53,23 +57,58 @@ class ReliableSQLGenerator(dspy.Module):
         pred = self.generate_sql(schema=schema, question=question)
         return pred
     
-schema = """
+
+question = "qual o departamento do sabonete?"
+
+def generate(question):
+    schema = """
     CREATE TABLE produtos (
       nome VARCHAR(50),
       departmento VARCHAR(50),
     );
     """
-question = "qual o departamento do sabonete?"
+    generator = ReliableSQLGenerator()
+    sql = generator.forward(schema, question)
+    print(sql)
+    conn = sqlite3.connect(db_path)
+    print(sql.sql_query)
+    results = conn.execute(sql.sql_query).fetchall()
+    return results
 
-generator = ReliableSQLGenerator()
-sql = generator.forward(schema, question)
-print(sql)
+API_TOKEN = '6677259411:AAEuGNSsEW4uAhRbqBbfzJqSN8pP46ODnUQ'
+bot = telebot.TeleBot(API_TOKEN)
 
-conn = sqlite3.connect(db_path)
-print(conn)
-print(sql.sql_query)
-results = conn.execute(sql.sql_query).fetchall()
-print(results)
+@bot.message_handler(func=lambda message: True)
+def reply_hi(message):
+  result = generate(message.text)
+  bot.reply_to(message, json.dumps(result))
 
+@bot.message_handler(content_types=['voice'])
+def transcribe_voice_message(message):
+    file_id = message.voice.file_id
+    # Get url to audio file.
+    file_path = bot.get_file_url(file_id)
 
+    # Transcribe the audio using Whisper AI
+    text = whisper_transcribe(file_path)
 
+    result = generate(text)
+    bot.reply_to(message, json.dumps(result))
+
+def whisper_transcribe(filepath: str, model="tiny") -> str:
+    """
+    Function to perform ASR on a .mp3 file
+    :param filepath: Path to the .mp3 audiofile.
+    :param model: Set the model type for whisper
+    ["tiny", "base", "small", "medium", "large"].
+    Larger model means more parameters, higher memory requirements and
+    slower speed.
+    :return: transcribed audio.
+    """
+    # Choose tiny model for faster output.
+    model = whisper.load_model(model)
+    result = model.transcribe(filepath)
+
+    return result["text"]
+
+bot.polling()

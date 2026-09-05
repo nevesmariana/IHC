@@ -13,7 +13,7 @@ DB_PATH = os.path.join(BASE_DIR, "estoque.db")
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS estoque (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    produto TESXT NOT NULL,
+    produto TEXT NOT NULL,
     departamento TEXT NOT NULL,
     data_fabricacao TEXT,
     data_validade TEXT,
@@ -59,8 +59,54 @@ def get_estoque():
 
     return {"data": [dict(row) for row in rows]}
 
+class SQLRequest(BaseModel):
+    sql: str
+
+
+@app.get("/estoque")
+def get_estoque():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+
+    rows = conn.execute(
+        "SELECT * FROM estoque"
+    ).fetchall()
+
+    conn.close()
+
+    return {
+        "data": [dict(row) for row in rows]
+    }
+
+@app.post("/query")
+def execute_query(request: SQLRequest):
+
+    sql = request.sql.strip()
+
+    if not sql.upper().startswith("SELECT"):
+        raise HTTPException(
+            status_code=400,
+            detail="Apenas consultas SELECT são permitidas."
+        )
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+
+        rows = conn.execute(sql).fetchall()
+
+        conn.close()
+
+        return {
+            "data": [dict(row) for row in rows]
+        }
+
+    except sqlite3.Error as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Erro ao executar SQL: {str(e)}"
+        )
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app,host="0.0.0.0",port=8000)

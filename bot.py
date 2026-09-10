@@ -1,22 +1,17 @@
-import json
-import sqlite3
-import requests
-
-import dspy
 import telebot
+import json
+import requests
 import whisper
+import sqlite3
+import os
+import dspy
+from dspy.teleprompt import BootstrapFewShot
 
-
-API_TOKEN = ""
-
+# ================= CONFIGURAÇÕES =================
+API_TOKEN = "8352129314:AAFYSBoPdiNi8tPLZR_7mHOtxk4MgI690xg"
 SERVER_URL = "http://localhost:8000/query"
+ARQUIVO_OTIMIZADO = "gerador_otimizado.json"
 
-# DSPy
-lm = dspy.LM("openai/gemma-4-E2B-it-IQ4_XS",api_base="http://localhost:1337/v1",api_key="not-needed")
-
-dspy.configure(lm=lm)
-
-# SCHEMA DO BANCO
 DB_SCHEMA = """
 CREATE TABLE estoque (
     id INTEGER,
@@ -28,204 +23,134 @@ CREATE TABLE estoque (
 );
 """
 
-# GERADOR DE SQL
+# DSPy Configuração
+lm = dspy.LM("openai/gemma-4-E2B-it-IQ4_XS", api_base="http://localhost:1337/v1", api_key="not-needed")
+dspy.configure(lm=lm)
+
+bot = telebot.TeleBot(API_TOKEN)
+
+# ================= MÓDULOS DE IA =================
 class TextToSQL(dspy.Signature):
-    """
-    Gera uma consulta SQL SELECT a partir de uma pergunta
-    em linguagem natural.
-
-    A consulta deve utilizar somente a tabela estoque.
-    """
-
-    dbschema = dspy.InputField(
-        desc="Schema do banco de dados"
-    )
-
-    question = dspy.InputField(
-        desc="Pergunta em linguagem natural"
-    )
-
-    sql_query = dspy.OutputField(
-        desc="Consulta SQL SELECT válida"
-    )
-
+    """Gera uma consulta SQL SELECT a partir de uma pergunta em linguagem natural."""
+    dbschema = dspy.InputField(desc="Schema do banco de dados")
+    question = dspy.InputField(desc="Pergunta em linguagem natural")
+    sql_query = dspy.OutputField(desc="Consulta SQL SELECT válida")
 
 class ReliableSQLGenerator(dspy.Module):
     def __init__(self):
         super().__init__()
-
-        self.generate_sql = dspy.ChainOfThought(
-            TextToSQL
-        )
+        self.generate_sql = dspy.ChainOfThought(TextToSQL)
 
     def forward(self, schema, question):
-        pred = self.generate_sql(
-            dbschema=schema,
-            question=question
-        )
-        return pred
+        return self.generate_sql(dbschema=schema, question=question)
+class GenerateResponse(dspy.Signature):
+        """Gera uma resposta amigável em linguagem natural baseada nos dados do banco."""
+        question = dspy.InputField(desc="Pergunta original do usuário")
+        data = dspy.InputField(desc="Dados brutos retornados do banco em JSON")
+        answer = dspy.OutputField(desc="Resposta em linguagem natural, curta e direta")
 
-# VALIDAÇÃO DO SQL
+# ================= VALIDAÇÃO (Requisitos 2 e 3) =================
 def validate_sql(sql):
-    sql = sql.strip()
-
-    # Remove possíveis blocos de código gerados pela IA
-    if sql.startswith("```"):
-        sql = sql.replace("```sql", "")
-        sql = sql.replace("```", "")
-        sql = sql.strip()
-
-    # somente SELECT pode ser executado
+    sql = sql.strip().replace("```sql", "").replace("```", "").strip()
+    
     if not sql.upper().startswith("SELECT"):
-        raise ValueError(
-            "O SQL gerado não é um SELECT."
-        )
+        raise ValueError("Erro de segurança: O SQL gerado não é um SELECT.")
 
-    # testa o SQL em SQLite em memória
     conn = sqlite3.connect(":memory:")
     try:
-        conn.execute("""
-            CREATE TABLE estoque (
-                id INTEGER,
-                produto TEXT,
-                departamento TEXT,
-                data_fabricacao TEXT,
-                data_validade TEXT,
-                quantidade INTEGER
-            )
-        """)
+        conn.execute(DB_SCHEMA)
         conn.execute(sql)
-
     except sqlite3.Error as e:
-        raise ValueError(
-            f"SQL inválido: {e}"
-        )
-
+        raise ValueError(f"SQL inválido gerado pela IA: {e}")
     finally:
         conn.close()
-
+    
     return sql
 
-# GERAR SQL
-def generate(question):
-    generator = ReliableSQLGenerator()
+# ================= OTIMIZADOR (Requisito 4) =================
+def metric_validacao(example, pred, trace=None):
+    """Métrica para o otimizador: o SQL deve ser válido e fazer match com o esperado."""
     try:
-        prediction = generator.forward(
-            DB_SCHEMA,
-            question
-        )
+        sql_valido = validate_sql(pred.sql_query)
+        return example.sql_query.strip().lower() in sql_valido.lower()
+    except Exception:
+        return False
 
-        sql = prediction.sql_query
+def otimizar_modelo():
+    """Roda o otimizador do DSPy e salva o modelo."""
+    print("Iniciando otimização do Prompt com GEPA/BootstrapFewShot...")
+    dataset = [
+        dspy.Example(question="Quantos sabonetes temos?", sql_query="SELECT quantidade FROM estoque WHERE produto = 'sabonete';").with_inputs("question"),
+        dspy.Example(question="Qual a validade da coca-cola?", sql_query="SELECT data_validade FROM estoque WHERE produto = 'coca-cola lata';").with_inputs("question")
+    ]
+    
+    teleprompter = BootstrapFewShot(metric=metric_validacao, max_bootstrapped_demos=2, max_labeled_demos=2)
+    gerador = ReliableSQLGenerator()
+    gerador_otimizado = teleprompter.compile(gerador, trainset=dataset)
+    gerador_otimizado.save(ARQUIVO_OTIMIZADO)
+    print(f"Otimização salva em {ARQUIVO_OTIMIZADO}!")
 
-        sql = validate_sql(sql)
-
-        return sql
-
-    except Exception as e:
-        print(f"Erro ao gerar/validar SQL: {e}")
-
-        raise
-
-# EXECUTAR NO SERVIDOR
-def execute_sql(sql):
-    response = requests.post(
-        SERVER_URL,
-        json={
-            "sql": sql
-        }
-    )
-
-    if response.status_code != 200:
-        raise Exception(
-            response.json().get(
-                "detail",
-                "Erro ao consultar o servidor."
-            )
-        )
-    return response.json()["data"]
-
-# CONSULTA COMPLETA
+# ================= INTEGRAÇÃO E TELEGRAM =================
 def ask_database(question):
-    sql = generate(question)
+    gerador = ReliableSQLGenerator()
+    
+    if os.path.exists(ARQUIVO_OTIMIZADO):
+        gerador.load(ARQUIVO_OTIMIZADO)
+        
+    try:
+        pred = gerador(schema=DB_SCHEMA, question=question)
+        sql = validate_sql(pred.sql_query)
+        print(f"SQL Gerado e Validado: {sql}")
 
-    print("SQL gerado:")
-    print(sql)
-
-    result = execute_sql(sql)
-
-    return result
-
-# TELEGRAM
-bot = telebot.TeleBot(API_TOKEN)
+        response = requests.post(SERVER_URL, json={"sql": sql})
+        if response.status_code != 200:
+            raise Exception("Erro ao consultar a API.")
+        
+        dados_brutos = response.json()["data"]
+        
+        tradutor = dspy.Predict(GenerateResponse)
+        resposta_ia = tradutor(question=question, data=str(dados_brutos))
+        
+        return resposta_ia.answer
+        
+    except Exception as e:
+        print(f"Erro no processo: {e}")
+        raise
 
 @bot.message_handler(content_types=["text"])
 def reply_text(message):
     try:
-        result = ask_database(
-            message.text
-        )
-
-        bot.reply_to(
-            message,
-            json.dumps(
-                result,
-                ensure_ascii=False
-            )
-        )
-
+        result = ask_database(message.text)
+        bot.reply_to(message, result)
     except Exception as e:
-        bot.reply_to(message,f"Erro: {e}")
+        bot.reply_to(message, f"Erro: {e}")
 
-# WHISPER
-def whisper_transcribe(
-    filepath: str,
-    model="tiny"
-) -> str:
-    model = whisper.load_model(model)
-
-    result = model.transcribe(filepath)
-
+def whisper_transcribe(filepath: str, model="tiny") -> str:
+    modelo = whisper.load_model(model)
+    result = modelo.transcribe(filepath)
     return result["text"]
 
-@bot.message_handler(
-    content_types=["voice"]
-)
+@bot.message_handler(content_types=["voice"])
 def transcribe_voice_message(message):
     try:
-        file_info = bot.get_file(
-            message.voice.file_id
-        )
-
-        downloaded_file = bot.download_file(
-            file_info.file_path
-        )
+        file_info = bot.get_file(message.voice.file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
         filepath = "audio.ogg"
-
+        
         with open(filepath, "wb") as f:
             f.write(downloaded_file)
-
-        text = whisper_transcribe(
-            filepath
-        )
+            
+        text = whisper_transcribe(filepath)
         result = ask_database(text)
-
-        bot.reply_to(
-            message,
-            json.dumps(
-                result,
-                ensure_ascii=False
-            )
-        )
-
+        bot.reply_to(message, json.dumps(result, ensure_ascii=False, indent=2))
     except Exception as e:
-        bot.reply_to(
-            message,
-            f"Erro: {e}"
-        )
+        bot.reply_to(message, f"Erro: {e}")
 
-# MAIN
 if __name__ == "__main__":
-
-    print("Bot iniciado...")
-
+    # PERGUNTA AO USUÁRIO SE QUER OTIMIZAR ANTES DE RODAR
+    escolha = input("Deseja rodar o otimizador do DSPy antes de iniciar o bot? (s/n): ")
+    if escolha.lower() == 's':
+        otimizar_modelo()
+        
+    print("Iniciando o Bot do Telegram...")
     bot.polling()

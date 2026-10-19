@@ -45,15 +45,6 @@ app = FastAPI(title="Estoque API")
 class SQLRequest(BaseModel):
     sql: str
 
-@app.get("/estoque")
-def get_estoque():
-    """Rota GET para expor todo o banco de dados."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute("SELECT * FROM estoque").fetchall()
-    conn.close()
-    return {"data": [dict(row) for row in rows]}
-
 @app.post("/query")
 def execute_query(request: SQLRequest):
     """Rota POST que recebe SQL e devolve o resultado."""

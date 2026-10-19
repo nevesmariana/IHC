@@ -8,7 +8,7 @@ import dspy
 from dspy.teleprompt import BootstrapFewShot
 
 # ================= CONFIGURAÇÕES =================
-API_TOKEN = "8352129314:AAFYSBoPdiNi8tPLZR_7mHOtxk4MgI690xg"
+API_TOKEN = "TELEGRAM_TOKEN"
 SERVER_URL = "http://localhost:8000/query"
 ARQUIVO_OTIMIZADO = "gerador_otimizado.json"
 

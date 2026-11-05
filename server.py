@@ -14,7 +14,9 @@ CREATE TABLE IF NOT EXISTS estoque (
     data_fabricacao TEXT,
     data_validade TEXT,
     quantidade INTEGER DEFAULT 0
-)
+);
+-- produtos existentes: 'sabonete', 'agua mineral 500 ml', 'coca-cola lata', 'detergente'
+-- departamentos existentes: 'higiene', 'bebidas', 'limpeza'
 """
 
 SEED_DATA = [

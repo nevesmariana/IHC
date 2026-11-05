@@ -5,10 +5,11 @@ import whisper
 import sqlite3
 import os
 import dspy
+import html
 from dspy.teleprompt import BootstrapFewShot
 
 # ================= CONFIGURAÇÕES =================
-API_TOKEN = "TELEGRAM_TOKEN"
+API_TOKEN = os.environ["TELEGRAM_TOKEN"]
 SERVER_URL = "http://localhost:8000/query"
 ARQUIVO_OTIMIZADO = "gerador_otimizado.json"
 
@@ -31,7 +32,13 @@ bot = telebot.TeleBot(API_TOKEN)
 
 # ================= MÓDULOS DE IA =================
 class TextToSQL(dspy.Signature):
-    """Gera uma consulta SQL SELECT a partir de uma pergunta em linguagem natural."""
+    """Gera uma consulta SQL SELECT a partir de uma pergunta em linguagem natural.
+    Regras:
+    -Sempre inclua a coluna 'produto' no SELECT, junto com as colunas pedidas. 
+    -NÃO use SUM, COUNT ou outras agregações quando a pergunta for sobre um produto específico.
+    - Para buscar um produto pelo nome, use LIKE com UMA ÚNICA palavra-chave, sem espaços nem hífens (ex: '%coca%', '%agua%'). Nunca use '='.
+    - Escreva a palavra do produto sem acento e em minúsculas (ex: 'agua', não 'água').
+    - Para quantidade: SELECT produto, quantidade FROM estoque WHERE produto LIKE '%...%'."""
     dbschema = dspy.InputField(desc="Schema do banco de dados")
     question = dspy.InputField(desc="Pergunta em linguagem natural")
     sql_query = dspy.OutputField(desc="Consulta SQL SELECT válida")
@@ -41,14 +48,10 @@ class ReliableSQLGenerator(dspy.Module):
         super().__init__()
         self.generate_sql = dspy.ChainOfThought(TextToSQL)
 
-    def forward(self, schema, question):
+    def forward(self, question,schema=DB_SCHEMA):
         return self.generate_sql(dbschema=schema, question=question)
-class GenerateResponse(dspy.Signature):
-        """Gera uma resposta amigável em linguagem natural baseada nos dados do banco."""
-        question = dspy.InputField(desc="Pergunta original do usuário")
-        data = dspy.InputField(desc="Dados brutos retornados do banco em JSON")
-        answer = dspy.OutputField(desc="Resposta em linguagem natural, curta e direta")
 
+    
 # ================= VALIDAÇÃO (Requisitos 2 e 3) =================
 def validate_sql(sql):
     sql = sql.strip().replace("```sql", "").replace("```", "").strip()
@@ -80,8 +83,13 @@ def otimizar_modelo():
     """Roda o otimizador do DSPy e salva o modelo."""
     print("Iniciando otimização do Prompt com GEPA/BootstrapFewShot...")
     dataset = [
-        dspy.Example(question="Quantos sabonetes temos?", sql_query="SELECT quantidade FROM estoque WHERE produto = 'sabonete';").with_inputs("question"),
-        dspy.Example(question="Qual a validade da coca-cola?", sql_query="SELECT data_validade FROM estoque WHERE produto = 'coca-cola lata';").with_inputs("question")
+        dspy.Example(question="Quantos sabonetes temos?", sql_query="SELECT produto, quantidade FROM estoque WHERE produto LIKE '%sabonete%';").with_inputs("question"),
+        dspy.Example(question="Qual a validade da coca cola?", sql_query="SELECT produto, data_validade FROM estoque WHERE produto LIKE '%coca%';").with_inputs("question"),
+        dspy.Example(question="Qual o departamento do detergente?", sql_query="SELECT departamento, produto FROM estoque WHERE produto LIKE '%detergente%';").with_inputs("question"),
+        dspy.Example(question="Qual o departamento da coca cola?", sql_query="SELECT departamento, produto FROM estoque WHERE produto LIKE '%coca%';").with_inputs("question"),
+        dspy.Example(question="Quantas águas temos?", sql_query="SELECT produto, quantidade FROM estoque WHERE produto LIKE '%agua%';").with_inputs("question"),
+        dspy.Example(question="Quais produtos vencem antes de 2026-12-31?", sql_query="SELECT produto, data_validade FROM estoque WHERE data_validade < '2026-12-31';").with_inputs("question"),
+        dspy.Example(question="Quais produtos ja venceram?", sql_query="SELECT produto, data_validade FROM estoque WHERE data_validade < date('now');").with_inputs("question"),
     ]
     
     teleprompter = BootstrapFewShot(metric=metric_validacao, max_bootstrapped_demos=2, max_labeled_demos=2)
@@ -98,53 +106,34 @@ def ask_database(question):
         gerador.load(ARQUIVO_OTIMIZADO)
         
     try:
-        pred = gerador(schema=DB_SCHEMA, question=question)
+        pred = gerador(question=question)
         sql = validate_sql(pred.sql_query)
-        print(f"SQL Gerado e Validado: {sql}")
+        sql = validate_sql(pred.sql_query)
+        print("SQL gerado:", sql)
 
         response = requests.post(SERVER_URL, json={"sql": sql})
         if response.status_code != 200:
             raise Exception("Erro ao consultar a API.")
         
-        dados_brutos = response.json()["data"]
-        
-        tradutor = dspy.Predict(GenerateResponse)
-        resposta_ia = tradutor(question=question, data=str(dados_brutos))
-        
-        return resposta_ia.answer
-        
+        dados = response.json()["data"]
+        # uma linha -> objeto; várias linhas -> lista
+        return dados[0] if len(dados) == 1 else dados
     except Exception as e:
-        print(f"Erro no processo: {e}")
-        raise
+        return {"erro": str(e)}
+
+def enviar_json(message, result):
+    texto = json.dumps(result, ensure_ascii=False, indent=2)[:3900]
+    texto = html.escape(texto)  # evita problemas com <, > e &
+    try:
+        bot.reply_to(message, f"<pre>{texto}</pre>", parse_mode="HTML")
+    except Exception:
+        # fallback: manda como texto puro, sem formatação
+        bot.reply_to(message, texto)
 
 @bot.message_handler(content_types=["text"])
 def reply_text(message):
-    try:
-        result = ask_database(message.text)
-        bot.reply_to(message, result)
-    except Exception as e:
-        bot.reply_to(message, f"Erro: {e}")
+    enviar_json(message, ask_database(message.text))
 
-def whisper_transcribe(filepath: str, model="tiny") -> str:
-    modelo = whisper.load_model(model)
-    result = modelo.transcribe(filepath)
-    return result["text"]
-
-@bot.message_handler(content_types=["voice"])
-def transcribe_voice_message(message):
-    try:
-        file_info = bot.get_file(message.voice.file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-        filepath = "audio.ogg"
-        
-        with open(filepath, "wb") as f:
-            f.write(downloaded_file)
-            
-        text = whisper_transcribe(filepath)
-        result = ask_database(text)
-        bot.reply_to(message, json.dumps(result, ensure_ascii=False, indent=2))
-    except Exception as e:
-        bot.reply_to(message, f"Erro: {e}")
 
 if __name__ == "__main__":
     # PERGUNTA AO USUÁRIO SE QUER OTIMIZAR ANTES DE RODAR

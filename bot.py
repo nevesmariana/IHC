@@ -129,16 +129,19 @@ def otimizar_modelo(modo="bootstrap"):
         dspy.Example(question="Quais produtos vencem antes de 2026-12-31?", sql_query="SELECT produto, data_validade FROM estoque WHERE data_validade < '2026-12-31';").with_inputs("question"),
         dspy.Example(question="Quais produtos ja venceram?", sql_query="SELECT produto, data_validade FROM estoque WHERE data_validade < date('now');").with_inputs("question"),
     ]
-    
+
     gerador = ReliableSQLGenerator()
     if modo == "gepa":
         reflection_lm = dspy.LM("openai/gemma-4-E2B-it-IQ4_XS", model_type="chat",
                                 api_base="http://localhost:1337/v1", api_key="not-needed",
                                 temperature=1.0, max_tokens=1000,
                                 extra_body={"chat_template_kwargs": {"enable_thinking": False}})
+        teleprompter = dspy.GEPA(metric=metric_gepa, max_metric_calls=40, reflection_lm=reflection_lm)
+        gerador_otimizado = teleprompter.compile(gerador, trainset=dataset, valset=dataset)
     else:
         teleprompter = BootstrapFewShot(metric=metric_validacao, max_bootstrapped_demos=2, max_labeled_demos=2)
         gerador_otimizado = teleprompter.compile(gerador, trainset=dataset)
+
     gerador_otimizado.save(ARQUIVO_OTIMIZADO)
     print(f"Otimização salva em {ARQUIVO_OTIMIZADO}!")
 

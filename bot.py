@@ -8,7 +8,6 @@ import dspy
 import html
 from dspy.teleprompt import BootstrapFewShot
 
-# [NOVO] dados do estoque, usados só pela métrica do GEPA (importar não sobe a API)
 from server import SEED_DATA
 
 # ================= CONFIGURAÇÕES =================
@@ -26,9 +25,6 @@ CREATE TABLE estoque (
     quantidade INTEGER
 );
 """
-
-# DSPy Configuração
-# [ALTERADO] temperature=0 e max_tokens=200: resposta determinística e curta (mais rápido)
 lm = dspy.LM("openai/gemma-4-E2B-it-IQ4_XS", model_type="chat",
              api_base="http://localhost:1337/v1", api_key="not-needed",
              temperature=0, max_tokens=200,
@@ -53,8 +49,6 @@ class TextToSQL(dspy.Signature):
 class ReliableSQLGenerator(dspy.Module):
     def __init__(self):
         super().__init__()
-        # [ALTERADO] Predict no lugar de ChainOfThought: o modelo não escreve raciocínio
-        # antes do SQL, então gera bem menos tokens. (Para voltar: dspy.ChainOfThought)
         self.generate_sql = dspy.Predict(TextToSQL)
 
     def forward(self, question,schema=DB_SCHEMA):
@@ -87,9 +81,7 @@ def metric_validacao(example, pred, trace=None):
         return example.sql_query.strip().lower() in sql_valido.lower()
     except Exception:
         return False
-
-# [NOVO] métrica do GEPA: compara o RESULTADO da consulta (não o texto do SQL) e devolve
-# um feedback em texto, que o GEPA usa para reescrever as instruções do prompt.
+    
 def _executar(sql):
     conn = sqlite3.connect(":memory:")
     conn.execute(DB_SCHEMA)
@@ -101,7 +93,7 @@ def _executar(sql):
         linhas = conn.execute(sql).fetchall()
     finally:
         conn.close()
-    # ignora a ordem das colunas e das linhas
+
     return sorted(tuple(sorted(str(v) for v in linha)) for linha in linhas)
 
 def metric_gepa(gold, pred, trace=None, pred_name=None, pred_trace=None):
@@ -116,7 +108,6 @@ def metric_gepa(gold, pred, trace=None, pred_name=None, pred_trace=None):
         return dspy.Prediction(score=0.0, feedback="A consulta retornou 0 linhas: a palavra do LIKE deve estar errada (acento, hífen, plural ou mais de uma palavra) ou o filtro está incorreto.")
     return dspy.Prediction(score=0.3, feedback=f"Resultado diferente do esperado. Esperado: {esperado}. Obtido: {obtido}. Revise as colunas do SELECT e o filtro WHERE.")
 
-# [ALTERADO] ganhou o parâmetro "modo" ("bootstrap" ou "gepa"); o dataset continua o mesmo
 def otimizar_modelo(modo="bootstrap"):
     """Roda o otimizador do DSPy e salva o modelo."""
     print(f"Iniciando otimização do Prompt com {modo}...")
@@ -146,7 +137,6 @@ def otimizar_modelo(modo="bootstrap"):
     print(f"Otimização salva em {ARQUIVO_OTIMIZADO}!")
 
 # ================= INTEGRAÇÃO E TELEGRAM =================
-# [NOVO] o gerador é criado e o .json lido UMA vez (antes era a cada pergunta)
 _gerador = None
 
 def carregar_gerador():
@@ -157,7 +147,6 @@ def carregar_gerador():
             try:
                 _gerador.load(ARQUIVO_OTIMIZADO)
             except Exception as e:
-                # .json salvo com outro formato (ex.: gerado com ChainOfThought)
                 print(f"Não consegui carregar {ARQUIVO_OTIMIZADO} ({e}). Usando o prompt original; apague o arquivo e otimize de novo.")
                 _gerador = ReliableSQLGenerator()
     return _gerador
@@ -166,7 +155,6 @@ def ask_database(question):
     try:
         t0 = time.time()
         pred = carregar_gerador()(question=question)
-        # [ALTERADO] removida a linha duplicada de validate_sql
         sql = validate_sql(pred.sql_query)
         print(f"SQL gerado: {sql} (LLM: {time.time() - t0:.1f}s)")
 
@@ -175,7 +163,6 @@ def ask_database(question):
             raise Exception("Erro ao consultar a API.")
         
         dados = response.json()["data"]
-        # uma linha -> objeto; várias linhas -> lista
         return dados[0] if len(dados) == 1 else dados
     except Exception as e:
         return {"erro": str(e)}
@@ -191,18 +178,17 @@ def enviar_json(message, result):
 
 @bot.message_handler(content_types=["text"])
 def reply_text(message):
-    bot.send_chat_action(message.chat.id, "typing")  # [NOVO] mostra "digitando..." na hora
+    bot.send_chat_action(message.chat.id, "typing") 
     enviar_json(message, ask_database(message.text))
 
 
 if __name__ == "__main__":
-    # [ALTERADO] agora tem 3 opções: não otimizar / Bootstrap / GEPA
     escolha = input("Otimizar o prompt antes de iniciar o bot? (n = não / b = Bootstrap / g = GEPA): ").lower()
     if escolha == 'g':
         otimizar_modelo("gepa")
     elif escolha in ('b', 's'):
         otimizar_modelo("bootstrap")
 
-    carregar_gerador()  # [NOVO] deixa o gerador pronto antes da primeira pergunta
+    carregar_gerador() 
     print("Iniciando o Bot do Telegram...")
     bot.polling()
